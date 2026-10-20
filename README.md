@@ -23,6 +23,10 @@ To build and check the frontend:
 npm run build
 ```
 
+## Releases
+
+Pushing a version tag matching `v*` (for example, `v0.1.0`) starts the GitHub Actions release workflow. It builds the desktop app for Linux, macOS, and Windows and publishes the platform installers to a GitHub release.
+
 ## GitHub access
 
 On first launch, create a fine-grained PAT using [GitHub's token settings](https://github.com/settings/personal-access-tokens/new), select only the repositories Devdesk should access, and grant **Metadata: read-only** for repository discovery. Contents: read-only is only needed if repository file browsing is implemented. The current GitHub feature set is read-only repository discovery; creating issues, managing pull requests, and reading workflow information are not currently supported and do not require broader permissions yet.
