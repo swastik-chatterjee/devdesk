@@ -25,3 +25,5 @@ uuid = { version = "1", features = ["v4"] }
 lto = "fat"
 opt-level = "z"
 codegen-units = 1
+strip = true
+panic = "abort"

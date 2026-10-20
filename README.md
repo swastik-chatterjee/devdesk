@@ -25,7 +25,7 @@ npm run build
 
 ## Releases
 
-Pushing a version tag matching `v*` (for example, `v0.1.0`) starts the GitHub Actions release workflow. It builds the desktop app for Linux, macOS, and Windows and publishes the platform installers to a GitHub release.
+Every push to `main` that passes the frontend and Rust checks creates a unique release tag using the app version and workflow run number (for example, `v0.1.0-build.42`). GitHub Actions then builds the release bundles for Linux, macOS, and Windows and publishes the installers to a GitHub release.
 
 ## GitHub access
 

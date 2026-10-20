@@ -3,8 +3,6 @@ name: Actions
 on:
   push:
     branches: [main]
-    tags:
-      - "v*"
   pull_request:
 
 permissions:
@@ -35,11 +33,34 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf
-      - run: cargo check --manifest-path src-tauri/Cargo.toml
+      - run: cargo check --release --manifest-path src-tauri/Cargo.toml
+
+  create-release-tag:
+    name: Create release tag
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [frontend, rust]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag-name: ${{ steps.tag.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - id: tag
+        name: Create a unique version tag
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          TAG="v${VERSION}-build.${GITHUB_RUN_NUMBER}"
+          git tag --annotate "$TAG" --message "Release $TAG" "$GITHUB_SHA"
+          git push origin "$TAG"
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
 
   publish:
     name: Publish (${{ matrix.platform }})
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: create-release-tag
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
@@ -68,13 +89,14 @@ jobs:
 
       - run: npm ci
 
-      - name: Build and publish release
+      - name: Build release bundles and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Devdesk ${{ github.ref_name }}
+          tagName: ${{ needs.create-release-tag.outputs.tag-name }}
+          releaseName: Devdesk ${{ needs.create-release-tag.outputs.tag-name }}
           releaseBody: "Download the installer for your platform from the assets below."
           releaseDraft: false
           prerelease: false
+          args: --verbose
