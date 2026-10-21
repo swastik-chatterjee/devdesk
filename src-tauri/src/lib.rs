@@ -43,6 +43,85 @@ struct GithubRepository {
     updated_at: String,
 }
 
+#[derive(Serialize)]
+struct WorkflowRun {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: String,
+    run_number: u64,
+    updated_at: String,
+    repository: String,
+}
+
+#[derive(Deserialize)]
+struct GithubWorkflowRuns {
+    workflow_runs: Vec<GithubWorkflowRun>,
+}
+
+#[derive(Deserialize)]
+struct GithubWorkflowRun {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: String,
+    run_number: u64,
+    updated_at: String,
+}
+
+#[derive(Serialize)]
+struct PullRequest {
+    title: String,
+    number: u64,
+    state: String,
+    html_url: String,
+    author: String,
+    updated_at: String,
+    repository: String,
+    draft: bool,
+    merged: bool,
+}
+
+#[derive(Deserialize)]
+struct GithubPullRequest {
+    title: String,
+    number: u64,
+    state: String,
+    html_url: String,
+    user: GithubPullRequestAuthor,
+    updated_at: String,
+    draft: bool,
+    merged_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GithubPullRequestAuthor {
+    login: String,
+}
+
+#[derive(Serialize)]
+struct ActivityEvent {
+    id: String,
+    event_type: String,
+    repository: String,
+    repository_url: String,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct GithubActivityEvent {
+    id: String,
+    #[serde(rename = "type")]
+    event_type: String,
+    repo: GithubActivityRepository,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct GithubActivityRepository {
+    name: String,
+}
+
 async fn fetch_repositories(client: &Client) -> Result<Vec<GithubRepository>, String> {
     let mut repositories = Vec::new();
     let mut page = 1;
@@ -84,7 +163,7 @@ fn credential(profile_id: &str) -> Result<Entry, String> {
 }
 
 fn github_client(token: &str) -> Result<Client, String> {
-    let mut auth = header::HeaderValue::from_str(&format!("Bearer {token}"))
+    let mut auth = header::HeaderValue::from_str(&["Bearer", token].join(" "))
         .map_err(|_| "The token contains invalid characters.".to_string())?;
     auth.set_sensitive(true);
     let mut headers = header::HeaderMap::new();
@@ -95,10 +174,23 @@ fn github_client(token: &str) -> Result<Client, String> {
         .build().map_err(|_| "Could not prepare a secure GitHub connection.".to_string())
 }
 
+fn profile_client(app: &tauri::AppHandle, profile_id: &str) -> Result<(Profile, Client), String> {
+    let profiles = read_profiles(app)?;
+    let profile = profiles
+        .into_iter()
+        .find(|profile| profile.profile_id == profile_id)
+        .ok_or_else(|| "This GitHub profile is no longer connected. Add it again in Settings.".to_string())?;
+    let token = credential(profile_id)?
+        .get_password()
+        .map_err(|_| "The saved GitHub token is unavailable. Replace this profile's token in Settings.".to_string())?;
+    let client = github_client(&token)?;
+    Ok((profile, client))
+}
+
 fn explain_status(status: StatusCode) -> String {
     match status {
         StatusCode::UNAUTHORIZED => "GitHub rejected this token. It may be invalid, expired, or revoked. Create a replacement token and try again.".into(),
-        StatusCode::FORBIDDEN => "GitHub denied this request. Check that the token has repository Metadata (read-only) access, includes the intended repositories, and is not rate-limited.".into(),
+        StatusCode::FORBIDDEN => "GitHub denied this request. Check that the token has the required read permission for this feature, includes the intended repositories, and is not rate-limited.".into(),
         StatusCode::NOT_FOUND => "GitHub could not find the requested account or repository access. Confirm the token can access at least one selected repository.".into(),
         _ => format!("GitHub returned HTTP {status}. Check your connection and token access, then try again."),
     }
@@ -161,14 +253,7 @@ fn list_profiles(app: tauri::AppHandle) -> Result<Vec<Profile>, String> {
 
 #[tauri::command]
 async fn list_repositories(app: tauri::AppHandle, profile_id: String) -> Result<Vec<Repository>, String> {
-    let profiles = read_profiles(&app)?;
-    if !profiles.iter().any(|profile| profile.profile_id == profile_id) {
-        return Err("This GitHub profile is no longer connected. Add it again in Settings.".into());
-    }
-    let token = credential(&profile_id)?.get_password()
-        .map_err(|_| "The saved GitHub token is unavailable. Replace this profile's token in Settings.".to_string())?;
-    let client = github_client(&token)?;
-    drop(token);
+    let (_, client) = profile_client(&app, &profile_id)?;
     let repos = fetch_repositories(&client).await?;
     Ok(repos.into_iter().map(|repo| Repository {
         name: repo.name,
@@ -178,6 +263,111 @@ async fn list_repositories(app: tauri::AppHandle, profile_id: String) -> Result<
         description: repo.description,
         updated_at: repo.updated_at,
     }).collect())
+}
+
+#[tauri::command]
+async fn list_workflow_runs(app: tauri::AppHandle, profile_id: String) -> Result<Vec<WorkflowRun>, String> {
+    let (_, client) = profile_client(&app, &profile_id)?;
+    let repositories = fetch_repositories(&client).await?;
+    let mut runs = Vec::new();
+
+    for repository in repositories.iter().take(10) {
+        let response = client
+            .get(format!("{GITHUB_API}/repos/{}/actions/runs?per_page=5", repository.full_name))
+            .send()
+            .await
+            .map_err(|_| format!("Could not retrieve Actions runs for {}.", repository.full_name))?;
+        if !response.status().is_success() {
+            return Err(explain_status(response.status()));
+        }
+        let mut repository_runs: GithubWorkflowRuns = response
+            .json()
+            .await
+            .map_err(|_| "GitHub returned an unreadable Actions response.".to_string())?;
+        runs.extend(repository_runs.workflow_runs.drain(..).map(|run| WorkflowRun {
+            name: run.name,
+            status: run.status,
+            conclusion: run.conclusion,
+            html_url: run.html_url,
+            run_number: run.run_number,
+            updated_at: run.updated_at,
+            repository: repository.full_name.clone(),
+        }));
+    }
+
+    runs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    runs.truncate(30);
+    Ok(runs)
+}
+
+#[tauri::command]
+async fn list_pull_requests(app: tauri::AppHandle, profile_id: String) -> Result<Vec<PullRequest>, String> {
+    let (_, client) = profile_client(&app, &profile_id)?;
+    let repositories = fetch_repositories(&client).await?;
+    let mut pull_requests = Vec::new();
+
+    for repository in repositories.iter().take(10) {
+        let response = client
+            .get(format!(
+                "{GITHUB_API}/repos/{}/pulls?state=all&sort=updated&direction=desc&per_page=5",
+                repository.full_name
+            ))
+            .send()
+            .await
+            .map_err(|_| format!("Could not retrieve pull requests for {}.", repository.full_name))?;
+        if !response.status().is_success() {
+            return Err(explain_status(response.status()));
+        }
+        let mut repository_pull_requests: Vec<GithubPullRequest> = response
+            .json()
+            .await
+            .map_err(|_| "GitHub returned an unreadable pull request response.".to_string())?;
+        pull_requests.extend(repository_pull_requests.drain(..).map(|pull_request| {
+            let merged = pull_request.merged_at.is_some();
+            PullRequest {
+                title: pull_request.title,
+                number: pull_request.number,
+                state: pull_request.state,
+                html_url: pull_request.html_url,
+                author: pull_request.user.login,
+                updated_at: pull_request.updated_at,
+                repository: repository.full_name.clone(),
+                draft: pull_request.draft,
+                merged,
+            }
+        }));
+    }
+
+    pull_requests.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    pull_requests.truncate(30);
+    Ok(pull_requests)
+}
+
+#[tauri::command]
+async fn list_activity(app: tauri::AppHandle, profile_id: String) -> Result<Vec<ActivityEvent>, String> {
+    let (profile, client) = profile_client(&app, &profile_id)?;
+    let response = client
+        .get(format!("{GITHUB_API}/users/{}/events?per_page=30", profile.username))
+        .send()
+        .await
+        .map_err(|_| "Could not retrieve recent GitHub activity.".to_string())?;
+    if !response.status().is_success() {
+        return Err(explain_status(response.status()));
+    }
+    let events: Vec<GithubActivityEvent> = response
+        .json()
+        .await
+        .map_err(|_| "GitHub returned an unreadable activity response.".to_string())?;
+    Ok(events
+        .into_iter()
+        .map(|event| ActivityEvent {
+            id: event.id,
+            event_type: event.event_type,
+            repository_url: format!("https://github.com/{}", event.repo.name),
+            repository: event.repo.name,
+            created_at: event.created_at,
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -193,7 +383,15 @@ fn disconnect_github(app: tauri::AppHandle, profile_id: String) -> Result<(), St
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![connect_github, list_profiles, list_repositories, disconnect_github])
+        .invoke_handler(tauri::generate_handler![
+            connect_github,
+            list_profiles,
+            list_repositories,
+            list_workflow_runs,
+            list_pull_requests,
+            list_activity,
+            disconnect_github
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Devdesk");
 }
